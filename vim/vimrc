@@ -10,9 +10,10 @@ set autoindent    " align the new line indent with the previous line
 
 " To have Vim jump to the last position when opening a file
 if has("autocmd")
-  au BufReadPost * if line("'\"") > 0 && line("'\"") <= line("$")
-    \| exe "normal! g'\"" | endif
+  au BufReadPost * if line("'\"") > 0 && line("'\"") <= line("$") | exe "normal! g'\"" | endif
 endif
 
 " Turn off beeping
 set vb t_vb=
+
+set nocompatible
