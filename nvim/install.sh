@@ -1,7 +1,18 @@
 #!/bin/bash
 
-# Install neovim (Ubuntu/Debian)
-sudo apt update && sudo apt install -y neovim
+# Detect OS and install neovim
+case "$(uname -s)" in
+    Linux*)
+        sudo apt update && sudo apt install -y neovim
+        ;;
+    Darwin*)
+        brew install neovim
+        ;;
+    *)
+        echo "Unsupported OS: $(uname -s)"
+        exit 1
+        ;;
+esac
 
 # Symlink config
 ln -sf "$(pwd)/nvim" ~/.config/nvim
