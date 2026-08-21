@@ -35,5 +35,16 @@ echo "Installing dotfiles from $DOTFILES_DIR"
 link "$DOTFILES_DIR/.tmux.conf" "$HOME/.tmux.conf"
 link "$DOTFILES_DIR/vim/vimrc" "$HOME/.vimrc"
 link "$DOTFILES_DIR/nvim" "$HOME/.config/nvim"
+# Not hidden on purpose: the snap build of glow cannot read dot-directories.
+link "$DOTFILES_DIR/mdview" "$HOME/mdview"
+
+# Source the `md` markdown-viewer function from ~/.bashrc, once.
+rc_line='[ -f ~/mdview/md.sh ] && . ~/mdview/md.sh'
+if [[ -f "$HOME/.bashrc" ]] && grep -qxF "$rc_line" "$HOME/.bashrc"; then
+  echo "  rc:     ~/.bashrc already sources mdview"
+else
+  printf '\n%s\n' "$rc_line" >> "$HOME/.bashrc"
+  echo "  rc:     appended mdview source line to ~/.bashrc"
+fi
 
 echo "done"
