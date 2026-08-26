@@ -7,16 +7,25 @@ git clone https://github.com/dsaccon/dotfiles.git ~/dotfiles
 ~/dotfiles/install.sh
 ```
 
-`install.sh` installs everything in one pass. It symlinks each component into place and is
-idempotent — safe to re-run. Existing symlinks are replaced; existing real files are backed
-up to `<name>.bak.<timestamp>` first, so nothing is silently lost.
+With no arguments, `install.sh` installs every component in one pass. Pass one or more
+component names to install only those:
 
-| Component | Installed to |
-| --- | --- |
-| `.tmux.conf` | `~/.tmux.conf` |
-| `vim/vimrc` | `~/.vimrc` |
-| `nvim/` | `~/.config/nvim` |
-| [`mdview/`](mdview/) | `~/mdview`, plus a source line appended to `~/.bashrc` |
+```sh
+~/dotfiles/install.sh mdview        # just mdview
+~/dotfiles/install.sh tmux nvim     # tmux and nvim
+~/dotfiles/install.sh --help        # list components
+```
+
+Each component is symlinked into place and the script is idempotent — safe to re-run.
+Existing symlinks are replaced; existing real files are backed up to
+`<name>.bak.<timestamp>` first, so nothing is silently lost.
+
+| Component | Source | Installed to |
+| --- | --- | --- |
+| `tmux` | `.tmux.conf` | `~/.tmux.conf` |
+| `vim` | `vim/vimrc` | `~/.vimrc` |
+| `nvim` | `nvim/` | `~/.config/nvim` |
+| `mdview` | [`mdview/`](mdview/) | `~/mdview`, plus a source line appended to `~/.bashrc` |
 
 ## mdview
 
