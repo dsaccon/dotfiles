@@ -1,0 +1,6 @@
+# Every network fetch is deliberate. Dependencies enter only via
+# `cargo gated add|update|fetch` (dotfiles/cargo/cargo-gated), which
+# age-gates Cargo.lock before anything is downloaded. Override for one
+# command with CARGO_NET_OFFLINE=false.
+[net]
+offline = true

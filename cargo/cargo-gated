@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# cargo-gated — the one door through which a dependency enters any Rust
+# project on this machine. ~/.cargo/config.toml (installed by
+# dotfiles/install.sh cargo) sets [net] offline = true globally, so a bare
+# `cargo fetch`/`update`/`add` fails closed in every project; this script is
+# the only place CARGO_NET_OFFLINE=false is set, and every path that sets it
+# is preceded by an age check against the resulting Cargo.lock.
+#
+# Installed as ~/.cargo/bin/cargo-gated, so it runs as `cargo gated <mode>`
+# from anywhere inside a cargo workspace. Origin: mega-harness's
+# scripts/deps-update.sh (docs/notes/dependency-cooldown-local-gap.md), built
+# after the 2026-08 arrayref incident — a compromised crate whose build.rs
+# ran within seconds of `cargo add`, before any check looked at it.
+#
+# `update`/`add` age-check BEFORE fetching sources: `cargo update`/`cargo
+# add` touch only the index and Cargo.lock — no crate source is downloaded
+# by either (verified; see the handoff's "facts already established") — so a
+# FAIL can restore the pre-change lockfile (and manifests, for `add`) with
+# nothing having reached disk yet. The age check runs exactly ONCE per
+# invocation: `fetch` runs it directly; `update`/`add` run it once as part
+# of deciding whether to restore, and that same verdict also decides
+# whether to fetch — neither re-checks a lockfile it just finished checking.
+#
+# Modes:
+#   init               adopt in the current workspace: write .cargo/config.toml
+#                       (offline), deny.toml (advisories + sources), a baseline
+#                       exempting every version already locked today, and
+#                       vendor ci-gates.sh + min-dep-age.py into scripts/ so
+#                       CI (which has no dotfiles) can run the same gates.
+#   fetch              age-check Cargo.lock, then fetch its sources. Takes
+#                       no arguments — see "no --force" below.
+#   update [args...]   cargo update, age-check, fetch on pass, restore
+#                       Cargo.lock on fail. args pass through to
+#                       `cargo update` (e.g. -p some-crate).
+#   add <args...>      cargo add, age-check, fetch on pass, restore
+#                       Cargo.lock + every Cargo.toml on fail. args pass
+#                       through to `cargo add` (e.g. -p cli some-crate).
+#
+# `fetch` ALWAYS age-checks — there is no --trust-lockfile flag. A lockfile
+# can change under a fresh clone (a rebase, a teammate's commit landing)
+# between when it was last verified and when it reaches this machine, so
+# trusting it unchecked would reopen exactly the gap this script exists to
+# close; the ~3.5-minute cost (1 req/s) is paid only when the lockfile
+# changed or the local cache is cold. (Controller ruling,
+# docs/notes/dependency-cooldown-handoff.md.) `fetch` also takes no
+# arguments at all — accepting and ignoring an unrecognized flag like
+# `--force` would silently fake the one override this script deliberately
+# does not have.
+#
+# min-dep-age-baseline.txt (workspace root) is the only override for an urgent fix —
+# visible in the diff, expiring, reviewed. There is no --force flag here, on
+# purpose: a flag leaves no trace in `git log` and cannot expire. (Same
+# ruling.)
+#
+# Fail-closed on interruption, not just on a bad verdict: `snapdir`/
+# `SNAPPED` below track any in-flight snapshot, and a trap restores it on
+# SIGINT/SIGTERM/SIGHUP or any other abnormal exit. Without this, a signal
+# arriving mid-age-check left Cargo.lock and every manifest modified but
+# unverified, with no restore and no message — and a version bumped by that
+# half-finished `update`/`add`, if already cached machine-wide by some other
+# project on this machine, would then build completely ungated. Two real
+# limits on that guarantee, not a blanket one:
+#
+#   - SIGKILL and power loss cannot be trapped by any process — the restore
+#     above is best-effort against everything short of those. If either
+#     happens mid-run, a dirty `git status` afterward is the signal to run
+#     `git checkout -- Cargo.lock '**/Cargo.toml'` by hand.
+#   - Bash sets SIGINT to ignored for an asynchronous job of a
+#     non-interactive shell (POSIX), and a signal already ignored on entry
+#     cannot be re-trapped — so if this script is itself launched with `&`
+#     from another script, Ctrl-C/SIGINT will NOT run the restore above.
+#     TERM and HUP are not subject to that rule and restore normally either
+#     way. Run this script in the foreground, or send it TERM, rather than
+#     relying on SIGINT once it has been backgrounded by a caller.
+#
+# Every long-running command (the age check, `cargo fetch`/`update`/`add`)
+# runs via run_interruptible(), not as a plain foreground command: bash
+# defers a trap until the foreground command completes on its own — a
+# signal during a ~3.5-minute age check would otherwise sit unhandled for
+# up to 3.5 more minutes, which defeats the point of trapping it at all
+# (measured directly: a bare `trap ... ; sleep 30` left SIGTERM completely
+# unacted-on for the full 30s; backgrounding that same sleep and using
+# `wait "$pid"` instead made the trap fire in under a millisecond). Bash's
+# own `wait` builtin, unlike a foreground external command, is documented
+# to return immediately when a trapped signal arrives, which is what lets
+# the trap below also kill the in-flight child rather than leaving it to
+# run to completion, orphaned.
+set -euo pipefail
+
+# Cargo invokes an external subcommand as `cargo-gated gated <args>`; drop
+# that first token so `cargo gated fetch` and a direct `cargo-gated fetch`
+# parse the same way.
+if [ "${1:-}" = "gated" ]; then shift; fi
+
+# The scripts live next to this file's real location (it is symlinked into
+# ~/.cargo/bin); the project is wherever cargo says the workspace root is.
+# locate-project reads the manifest only — no index, no network.
+case "${1:-}" in
+  init|fetch|update|add) ;;
+  *)
+    echo "usage: cargo gated {init|fetch|update [cargo-update args...]|add <cargo-add args...>}" >&2
+    exit 2
+    ;;
+esac
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+ROOT="$(dirname "$(cargo locate-project --workspace --message-format plain)")"
+cd "$ROOT"
+BASELINE="${MIN_DEP_AGE_BASELINE:-min-dep-age-baseline.txt}"
+
+MIN_DEP_AGE_DAYS="${MIN_DEP_AGE_DAYS:-8}"
+
+step() { printf '\n==> %s\n' "$*"; }
+
+# Runs "$@" in the background and waits for it, so a trapped signal
+# interrupts the wait promptly instead of being deferred until "$@"
+# finishes on its own (see the header comment). running_pid is read by the
+# trap below to kill this specific process on the way out. Backgrounding
+# also repoints "$@"'s stdin at /dev/null (bash's own behaviour for an
+# async job) — harmless today since nothing here prompts, but it is why a
+# future git-sourced dependency or credential prompt would fail fast
+# instead of hanging, not a mystery.
+running_pid=""
+run_interruptible() {
+  "$@" &
+  running_pid=$!
+  local rc=0
+  wait "$running_pid" || rc=$?
+  running_pid=""
+  return "$rc"
+}
+
+age_check() {
+  local baseline_args=()
+  if [ -f "$BASELINE" ]; then
+    baseline_args=(--baseline "$BASELINE")
+  fi
+  run_interruptible python3 "$HERE/min-dep-age.py" --lockfile Cargo.lock \
+    --min-days "$MIN_DEP_AGE_DAYS" "${baseline_args[@]}"
+}
+
+# min-dep-age.py's own contract is exit 0/1/2 (see its docstring), but this
+# script fails closed even if that contract is ever violated in practice —
+# python3 missing is exit 127, for instance — so every non-zero code gets an
+# honest label instead of the two named ones silently absorbing whatever
+# else comes back. Only 1 is a real verdict (a young or unresolvable crate);
+# 2 and anything else mean the check did not produce one at all.
+explain_age_rc() {
+  case "$1" in
+    2) echo "the age check could not reach crates.io — a network failure, not a verdict" ;;
+    1) echo "Cargo.lock has a locked version younger than ${MIN_DEP_AGE_DAYS} days (see above)" ;;
+    *) echo "the age check itself could not run (exit $1)" ;;
+  esac
+}
+
+# Copies each of "$@" into a fresh scratch dir, numbered by position; prints
+# the dir. mktemp, not `git stash`: stashing would sweep up unrelated
+# uncommitted work elsewhere in the tree, which is not this script's
+# business.
+snapshot() {
+  local dir i=0
+  dir=$(mktemp -d)
+  for f in "$@"; do
+    i=$((i + 1))
+    cp "$f" "$dir/$i"
+  done
+  echo "$dir"
+}
+
+# Copies a snapshot dir's numbered files back onto "$@", in the same order
+# they were passed to snapshot(), then removes the scratch dir. Copying the
+# same snapshot back twice is harmless (idempotent), which matters below:
+# an interruption partway through a restore is healed by a second, complete
+# call from the trap.
+restore() {
+  local dir="$1" i=0
+  shift
+  for f in "$@"; do
+    i=$((i + 1))
+    cp "$dir/$i" "$f"
+  done
+  rm -rf "$dir"
+}
+
+# In-flight snapshot, tracked globally so the trap below can restore it if
+# the script dies mid-operation. Cleared to "" the instant a snapshot is
+# resolved (restored, or discarded on a verified pass), so the trap is a
+# no-op on every normal exit: its guard checks both that a snapshot is
+# named AND that its directory still exists on disk, and the directory is
+# always removed (by restore(), or directly) in the same breath as the
+# variable is cleared — whichever of the two a signal lands between, the
+# other still makes the guard false.
+snapdir=""
+SNAPPED=()
+trap '
+  rc=$?
+  if [ -n "$running_pid" ]; then
+    kill "$running_pid" 2>/dev/null || true
+    wait "$running_pid" 2>/dev/null || true
+  fi
+  if [ -n "$snapdir" ] && [ -d "$snapdir" ]; then
+    restore "$snapdir" "${SNAPPED[@]}"
+    echo "RESTORED (interrupted): nothing was downloaded." >&2
+  fi
+  exit "$rc"
+' EXIT INT TERM HUP
+
+# Age-checks Cargo.lock as it stands right now and aborts — without
+# fetching — on anything but a clean pass. Used directly by `fetch` mode,
+# which has no snapshot to restore (fetch never changes Cargo.lock).
+age_gate() {
+  step "age-checking Cargo.lock (>= ${MIN_DEP_AGE_DAYS}d, min-dep-age.py)"
+  local rc=0
+  age_check || rc=$?
+  if [ "$rc" = 0 ]; then
+    return 0
+  fi
+  echo "ABORTED: $(explain_age_rc "$rc"); nothing was fetched." >&2
+  exit "$rc"
+}
+
+fetch_sources() {
+  step "cargo fetch --locked"
+  run_interruptible env CARGO_NET_OFFLINE=false cargo fetch --locked
+}
+
+# Age-checks the Cargo.lock a caller just changed, exactly once, and either
+# fetches or restores based on that single verdict. `update`/`add` call
+# this instead of age_gate-then-fetch_sources separately, so a successful
+# run never pays for a second age check of the one lockfile change.
+#   $1     human label for the restore message
+#   $2     the snapshot dir from snapshot()
+#   $3..   the exact file list passed to snapshot(), same order
+resolve_then_fetch() {
+  local label="$1" dir="$2"
+  shift 2
+  step "age-checking the updated Cargo.lock (>= ${MIN_DEP_AGE_DAYS}d)"
+  local rc=0
+  age_check || rc=$?
+  if [ "$rc" = 0 ]; then
+    rm -rf "$dir"
+    snapdir=""
+    fetch_sources
+    return
+  fi
+  restore "$dir" "$@"
+  snapdir=""
+  echo "RESTORED $label: $(explain_age_rc "$rc"); nothing was downloaded." >&2
+  exit "$rc"
+}
+
+case "${1:-}" in
+  fetch)
+    shift
+    if [ "$#" -gt 0 ]; then
+      echo "usage: cargo gated fetch (takes no arguments — there is no --trust-lockfile or --force)" >&2
+      exit 2
+    fi
+    age_gate
+    fetch_sources
+    ;;
+  update)
+    shift
+    SNAPPED=(Cargo.lock)
+    snapdir=$(snapshot "${SNAPPED[@]}")
+    step "cargo update $*"
+    if ! run_interruptible env CARGO_NET_OFFLINE=false cargo update "$@"; then
+      restore "$snapdir" "${SNAPPED[@]}"
+      snapdir=""
+      echo "RESTORED Cargo.lock: cargo update itself failed; nothing changed, nothing downloaded." >&2
+      exit 1
+    fi
+    resolve_then_fetch "Cargo.lock" "$snapdir" "${SNAPPED[@]}"
+    ;;
+  add)
+    shift
+    # Every workspace manifest `cargo add` could touch: the root manifest
+    # plus each member's, from cargo's own view of the workspace rather
+    # than a glob — so it cannot wander into target/ or a sibling worktree
+    # and stays correct when a member is added. --offline: metadata
+    # --no-deps reads manifests only, never the index.
+    mapfile -t MANIFESTS < <(
+      { echo "$ROOT/Cargo.toml";
+        cargo metadata --no-deps --offline --format-version 1 \
+          | python3 -c 'import json,sys; [print(p["manifest_path"]) for p in json.load(sys.stdin)["packages"]]'; } \
+      | sort -u)
+    if [ "${#MANIFESTS[@]}" -eq 0 ]; then
+      echo "BUG: cargo metadata found no Cargo.toml files — refusing to run with an empty manifest list" >&2
+      exit 1
+    fi
+    SNAPPED=(Cargo.lock "${MANIFESTS[@]}")
+    snapdir=$(snapshot "${SNAPPED[@]}")
+    step "cargo add $*"
+    if ! run_interruptible env CARGO_NET_OFFLINE=false cargo add "$@"; then
+      restore "$snapdir" "${SNAPPED[@]}"
+      snapdir=""
+      echo "RESTORED Cargo.lock and every Cargo.toml: cargo add itself failed; nothing changed, nothing downloaded." >&2
+      exit 1
+    fi
+    resolve_then_fetch "Cargo.lock and every Cargo.toml" "$snapdir" "${SNAPPED[@]}"
+    ;;
+  init)
+    shift
+    if [ "$#" -gt 0 ]; then
+      echo "usage: cargo gated init (takes no arguments)" >&2
+      exit 2
+    fi
+    if [ ! -f Cargo.lock ]; then
+      echo "ABORTED: no Cargo.lock at $ROOT — run 'cargo generate-lockfile' first (CARGO_NET_OFFLINE=false if the index is cold), then re-run init." >&2
+      exit 1
+    fi
+    write_if_absent() {  # $1 dst, $2 src
+      if [ -e "$1" ]; then echo "  keep:   $1 (exists)"; else mkdir -p "$(dirname "$1")"; cp "$2" "$1"; echo "  write:  $1"; fi
+    }
+    step "adopting the cooldown in $ROOT"
+    write_if_absent .cargo/config.toml "$HERE/config.toml"
+    write_if_absent deny.toml "$HERE/deny.toml.template"
+    write_if_absent scripts/min-dep-age.py "$HERE/min-dep-age.py"
+    write_if_absent scripts/ci-gates.sh "$HERE/ci-gates.sh"
+    chmod +x scripts/ci-gates.sh scripts/min-dep-age.py
+    if [ -e "$BASELINE" ]; then
+      echo "  keep:   $BASELINE (exists)"
+    else
+      {
+        printf '# Minimum-dependency-age baseline — every crates.io version already locked\n'
+        printf '# when the %s-day cooldown was adopted on %s. The cooldown gates CHANGES to\n' "$MIN_DEP_AGE_DAYS" "$(date -u +%F)"
+        printf '# Cargo.lock; it does not audit history, so these exact versions are exempt\n'
+        printf '# while they remain locked. min-dep-age.py prints a NOTE as each ages out;\n'
+        printf '# delete the file once empty. Never add to it to make CI green.\n'
+        python3 - <<'PY'
+import tomllib
+lock = tomllib.load(open("Cargo.lock", "rb"))
+reg = "registry+https://github.com/rust-lang/crates.io-index"
+for p in sorted((p["name"], p["version"]) for p in lock.get("package", []) if p.get("source") == reg):
+    print(*p)
+PY
+      } > "$BASELINE"
+      echo "  write:  $BASELINE ($(grep -vc '^#' "$BASELINE") locked versions exempted)"
+    fi
+    cat <<EOF
+
+Next:
+  - commit the five files above
+  - CI: install cargo-deny pinned (see $HERE/README.md), then run scripts/ci-gates.sh
+    BEFORE any step that compiles — clippy/test execute every build script
+  - from now on: cargo gated add/update/fetch; bare cargo add/update fails closed
+EOF
+    ;;
+  *)
+    echo "usage: cargo gated {init|fetch|update [cargo-update args...]|add <cargo-add args...>}" >&2
+    exit 2
+    ;;
+esac

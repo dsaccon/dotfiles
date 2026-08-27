@@ -10,6 +10,8 @@
 #   vim     vim/vimrc    -> ~/.vimrc
 #   nvim    nvim/        -> ~/.config/nvim
 #   mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc
+#   cargo   cargo/       -> ~/.cargo/bin/cargo-gated, [net] offline=true in
+#                          ~/.cargo/config.toml, cargo-deny pinned (needs cargo)
 #
 # Idempotent: safe to re-run. Overwrites existing symlinks; backs up
 # existing real files (or directories) before replacing them. Works
@@ -18,7 +20,8 @@
 set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPONENTS=(tmux vim nvim mdview)
+COMPONENTS=(tmux vim nvim mdview cargo)
+CARGO_DENY_VERSION=0.20.2
 
 usage() {
   cat <<USAGE
@@ -31,6 +34,8 @@ Components:
   vim     vim/vimrc    -> ~/.vimrc
   nvim    nvim/        -> ~/.config/nvim
   mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc
+  cargo   cargo/       -> ~/.cargo/bin/cargo-gated, global [net] offline=true,
+                          cargo-deny pinned; skipped if cargo is absent
 
 Examples:
   $(basename "$0")               # install everything
@@ -83,6 +88,41 @@ install_mdview() {
   else
     printf '\n%s\n' "$rc_line" >> "$HOME/.bashrc"
     echo "  rc:     appended mdview source line to ~/.bashrc"
+  fi
+}
+
+install_cargo() {
+  # Dependency cooldown for every Rust project on this machine (cargo/README.md).
+  # Rust is not on every machine: skip, loudly, rather than fail `all`.
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "  skip:   cargo not on PATH (not a Rust machine)"
+    return 0
+  fi
+
+  link "$DOTFILES_DIR/cargo/cargo-gated" "$HOME/.cargo/bin/cargo-gated"
+
+  # Global offline-by-default. Merged, not linked: ~/.cargo/config.toml may
+  # hold other settings (registries, aliases) that must survive.
+  local cfg="$HOME/.cargo/config.toml"
+  if [[ -f "$cfg" ]] && grep -qE '^\s*offline\s*=' "$cfg"; then
+    echo "  config: $cfg already sets net.offline"
+  elif [[ -f "$cfg" ]] && grep -qxF '[net]' "$cfg"; then
+    sed -i '/^\[net\]$/a offline = true' "$cfg"
+    echo "  config: added offline = true under existing [net] in $cfg"
+  else
+    mkdir -p "$(dirname "$cfg")"
+    [[ -f "$cfg" ]] && printf '\n' >> "$cfg"
+    cat "$DOTFILES_DIR/cargo/config.toml" >> "$cfg"
+    echo "  config: appended [net] offline = true to $cfg"
+  fi
+
+  # cargo-deny at an exact, aged version — never "latest" (that is an
+  # unpinned, ungated install of hundreds of build scripts).
+  if cargo deny --version 2>/dev/null | grep -q " ${CARGO_DENY_VERSION}\$"; then
+    echo "  deny:   cargo-deny ${CARGO_DENY_VERSION} already installed"
+  else
+    echo "  deny:   installing cargo-deny ${CARGO_DENY_VERSION} (network)"
+    CARGO_NET_OFFLINE=false cargo install cargo-deny --version "${CARGO_DENY_VERSION}" --locked
   fi
 }
 

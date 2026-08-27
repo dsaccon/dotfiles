@@ -1,0 +1,28 @@
+# cargo-deny configuration — written by `cargo gated init`. Requires the
+# exact cargo-deny version dotfiles/install.sh pins (see dotfiles/cargo/README.md).
+#
+# [advisories] catches a version already locked that is later disclosed
+# malicious — the age gate cannot (it screens versions only when they are
+# newly added to the lockfile). Every advisory is an error unless listed in
+# `ignore` with a reason; never a blanket ignore.
+#
+# [sources] restricts to crates.io. Also closes min-dep-age.py's silent skip
+# of git-sourced crates (it checks crates.io lockfile entries only, so a git
+# dependency would otherwise bypass the cooldown by construction).
+#
+# Add [bans] / [licenses] per project as needed.
+
+[advisories]
+db-path = "~/.cargo/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = [
+    # { id = "RUSTSEC-YYYY-NNNN", reason = "why, and what removes the need" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
