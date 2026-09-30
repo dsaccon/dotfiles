@@ -12,6 +12,8 @@
 #   mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc
 #   cargo   cargo/       -> ~/.cargo/bin/cargo-gated, [net] offline=true in
 #                          ~/.cargo/config.toml, cargo-deny pinned (needs cargo)
+#   claude  claude/hooks -> ~/.claude/hooks/dependency-gate.sh, plus its
+#                          PreToolUse entry merged into ~/.claude/settings.json
 #
 # Idempotent: safe to re-run. Overwrites existing symlinks; backs up
 # existing real files (or directories) before replacing them. Works
@@ -20,7 +22,7 @@
 set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPONENTS=(tmux vim nvim mdview cargo)
+COMPONENTS=(tmux vim nvim mdview cargo claude)
 CARGO_DENY_VERSION=0.20.2
 
 usage() {
@@ -36,6 +38,8 @@ Components:
   mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc
   cargo   cargo/       -> ~/.cargo/bin/cargo-gated, global [net] offline=true,
                           cargo-deny pinned; skipped if cargo is absent
+  claude  claude/hooks -> ~/.claude/hooks/dependency-gate.sh, plus its
+                          PreToolUse entry merged into ~/.claude/settings.json
 
 Examples:
   $(basename "$0")               # install everything
@@ -123,6 +127,32 @@ install_cargo() {
   else
     echo "  deny:   installing cargo-deny ${CARGO_DENY_VERSION} (network)"
     CARGO_NET_OFFLINE=false cargo install cargo-deny --version "${CARGO_DENY_VERSION}" --locked
+  fi
+}
+
+install_claude() {
+  # Guardrails for Claude Code sessions (claude/README.md): a PreToolUse hook
+  # that refuses dependency installs until the human creates its one-shot
+  # token. Needs jq (the hook parses its stdin with it).
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  skip:   jq not on PATH (the claude hook needs it)"
+    return 0
+  fi
+
+  link "$DOTFILES_DIR/claude/hooks/dependency-gate.sh" "$HOME/.claude/hooks/dependency-gate.sh"
+
+  # The settings entry is MERGED into ~/.claude/settings.json, never replacing
+  # what is there; idempotent.
+  local cfg="$HOME/.claude/settings.json"
+  mkdir -p "$(dirname "$cfg")"
+  [[ -f "$cfg" ]] || echo '{}' > "$cfg"
+  if jq -e '.hooks.PreToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | test("dependency-gate"))' "$cfg" >/dev/null 2>&1; then
+    echo "  hook:   $cfg already wires dependency-gate"
+  else
+    local tmp
+    tmp=$(mktemp)
+    jq '.hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{"matcher":"Bash","hooks":[{"type":"command","command":"$HOME/.claude/hooks/dependency-gate.sh","timeout":10,"statusMessage":"dependency-gate"}]}])' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+    echo "  hook:   added the dependency-gate PreToolUse entry to $cfg"
   fi
 }
 
