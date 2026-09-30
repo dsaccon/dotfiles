@@ -1,7 +1,7 @@
 # md — terminal markdown viewer (glow front-end).
 #
 # Install: handled by ../install.sh, which links this dir to ~/mdview and
-# appends the source line below to ~/.bashrc:
+# appends the source line below to ~/.bashrc and ~/.zshrc:
 #   [ -f ~/mdview/md.sh ] && . ~/mdview/md.sh
 #
 # Commands:
@@ -91,12 +91,28 @@ _md_resolve() {
   printf '%s' "$real"
 }
 
+# Run a command string under a pty. util-linux `script` takes the command via
+# -c; BSD/macOS `script` has no -c and takes it as trailing arguments.
+# BSD `script` also passes stdin's EOF to the pty as ^D, which the pty echoes
+# as "^D\b\b" ahead of the output; strip that, keeping script's exit status.
+_md_pty() {
+  local bs rc
+  if script -qec true /dev/null </dev/null >/dev/null 2>&1; then
+    script -qec "$1" /dev/null
+  else
+    bs=$(printf '\b\b')
+    { rc=$( { { script -q /dev/null sh -c "$1"; echo $? >&3; } \
+      | sed "1s/^\^D$bs//" >&4; } 3>&1 ); } 4>&1
+    return "$rc"
+  fi
+}
+
 # Render to stdout, keeping full colour even though stdout is a pipe.
 _md_render() {
   local real rc=0
   real=$(_md_resolve "$1") || return 1
   if command -v script >/dev/null 2>&1; then
-    script -qec "glow -s '$(_md_style)' -w $(_md_cols) -- '$real'" /dev/null </dev/null || rc=$?
+    _md_pty "glow -s '$(_md_style)' -w $(_md_cols) -- '$real'" </dev/null || rc=$?
   else
     CLICOLOR_FORCE=1 glow -s "$(_md_style)" -w "$(_md_cols)" -- "$real" </dev/null || rc=$?
   fi
@@ -127,6 +143,8 @@ md() {
 # trap.
 mdtheme() {
   local d s t f cur
+  # zsh does not word-split unquoted $MD_THEMES the way bash does; make it.
+  [ -n "$ZSH_VERSION" ] && setopt local_options sh_word_split
   d=$(_md_dir); s=$(_md_state); cur=$(_md_theme)
 
   if [ $# -gt 0 ]; then

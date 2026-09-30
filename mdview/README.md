@@ -24,7 +24,9 @@ MD_MAX=120 md doc.md      # clamp width on very wide screens
 ## Install
 
 Handled by `../install.sh`: links this directory to `~/mdview` and appends the source
-line to `~/.bashrc`. Both steps are idempotent.
+line to `~/.bashrc` and `~/.zshrc`. Both steps are idempotent. It does not install
+`glow` itself; if `glow` is missing it says so and how to get it, and until then `md`
+falls back to `bat`, then `less`, then `cat`.
 
 `~/mdview` is **deliberately not a hidden directory** — see the snap note below.
 
@@ -168,7 +170,8 @@ Measured on the same file and style:
 
 So `md` hands the terminal straight to glow and lets glow page. Where output genuinely
 has to go through a pipe — the multi-theme preview — glow runs under a pty via `script`,
-which preserves the full palette; without `script` on `PATH` it falls back to
+which preserves the full palette (util-linux and BSD/macOS `script` take different
+arguments; both are handled); without `script` on `PATH` it falls back to
 `CLICOLOR_FORCE=1` and the degraded 16 colours.
 
 The lesson worth keeping: checking a style file's **exit code** proves nothing about

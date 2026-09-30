@@ -9,7 +9,8 @@
 #   tmux    .tmux.conf   -> ~/.tmux.conf
 #   vim     vim/vimrc    -> ~/.vimrc
 #   nvim    nvim/        -> ~/.config/nvim
-#   mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc
+#   mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc and
+#                          ~/.zshrc
 #   cargo   cargo/       -> ~/.cargo/bin/cargo-gated, [net] offline=true in
 #                          ~/.cargo/config.toml, cargo-deny pinned (needs cargo)
 #   claude  claude/hooks -> ~/.claude/hooks/dependency-gate.sh, plus its
@@ -35,7 +36,8 @@ Components:
   tmux    .tmux.conf   -> ~/.tmux.conf
   vim     vim/vimrc    -> ~/.vimrc
   nvim    nvim/        -> ~/.config/nvim
-  mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc
+  mdview  mdview/      -> ~/mdview, plus a source line in ~/.bashrc and
+                          ~/.zshrc
   cargo   cargo/       -> ~/.cargo/bin/cargo-gated, global [net] offline=true,
                           cargo-deny pinned; skipped if cargo is absent
   claude  claude/hooks -> ~/.claude/hooks/dependency-gate.sh, plus its
@@ -85,13 +87,28 @@ install_mdview() {
   # Not hidden on purpose: the snap build of glow cannot read dot-directories.
   link "$DOTFILES_DIR/mdview" "$HOME/mdview"
 
-  # Source the `md` markdown-viewer function from ~/.bashrc, once.
+  # Source the `md` markdown-viewer function from both shells' rc files, once
+  # each: macOS defaults to zsh, most Linux to bash, and md.sh works in either.
   local rc_line='[ -f ~/mdview/md.sh ] && . ~/mdview/md.sh'
-  if [[ -f "$HOME/.bashrc" ]] && grep -qxF "$rc_line" "$HOME/.bashrc"; then
-    echo "  rc:     ~/.bashrc already sources mdview"
-  else
-    printf '\n%s\n' "$rc_line" >> "$HOME/.bashrc"
-    echo "  rc:     appended mdview source line to ~/.bashrc"
+  local rc
+  for rc in .bashrc .zshrc; do
+    if [[ -f "$HOME/$rc" ]] && grep -qxF "$rc_line" "$HOME/$rc"; then
+      echo "  rc:     ~/$rc already sources mdview"
+    else
+      printf '\n%s\n' "$rc_line" >> "$HOME/$rc"
+      echo "  rc:     appended mdview source line to ~/$rc"
+    fi
+  done
+
+  # glow is not installed here: package managers differ per machine, and new
+  # third-party code is the maintainer's call. Say what's missing and how.
+  if ! command -v glow >/dev/null 2>&1; then
+    echo "  note:   glow not on PATH; md falls back to bat, less or cat (no themes)"
+    if command -v brew >/dev/null 2>&1; then
+      echo "          install it with: brew install glow"
+    else
+      echo "          install it from: https://github.com/charmbracelet/glow#installation"
+    fi
   fi
 }
 

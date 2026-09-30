@@ -25,7 +25,7 @@ Existing symlinks are replaced; existing real files are backed up to
 | `tmux` | `.tmux.conf` | `~/.tmux.conf` |
 | `vim` | `vim/vimrc` | `~/.vimrc` |
 | `nvim` | `nvim/` | `~/.config/nvim` |
-| `mdview` | [`mdview/`](mdview/) | `~/mdview`, plus a source line appended to `~/.bashrc` |
+| `mdview` | [`mdview/`](mdview/) | `~/mdview`, plus a source line appended to `~/.bashrc` and `~/.zshrc` |
 
 ## mdview
 
