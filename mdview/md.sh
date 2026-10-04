@@ -120,6 +120,10 @@ _md_render() {
   return $rc
 }
 
+# oh-my-zsh aliases md='mkdir -p'. An alias is expanded while `md() {` is
+# parsed, turning it into a syntax error that aborts loading this file, so
+# drop it first.
+unalias md 2>/dev/null || true
 md() {
   [ $# -eq 0 ] && { echo "usage: md FILE.md [...]" >&2; return 2; }
   _md_have_glow || { _md_fallback "$@"; return; }
