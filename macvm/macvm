@@ -1,0 +1,155 @@
+#!/bin/bash
+# macvm — one general-purpose macOS VM on an Apple Silicon Mac, built with tart from Apple's
+# own restore image. macOS's own bash 3.2; no bash-4 features.
+#
+#   macvm create           install macOS into a new VM, walk the first-boot setup, enable key login
+#   macvm up [--headless]  start the VM (with a window unless --headless)
+#   macvm down             stop the VM
+#   macvm status           whether it runs, and its address
+#   macvm ssh [command]    log in to the VM by key (or run one command there)
+#   macvm key              (re)do create's last part: save the account name, install this Mac's key
+#   macvm help             everything above, for a beginner
+#
+# Settings, from the environment (defaults in brackets):
+#   MACVM_NAME [macvm]  MACVM_IMAGE [latest]  MACVM_CPU [4]  MACVM_MEMORY_MB [6144]  MACVM_DISK_GB [50]
+# Deleting a VM is left to you: `tart delete <name>`, then remove ~/.macvm/<name>.
+set -u
+NAME=${MACVM_NAME:-macvm}
+IMAGE=${MACVM_IMAGE:-latest}   # `latest`: the newest macOS this Mac can host; or an .ipsw path or URL
+CPU=${MACVM_CPU:-4}
+MEMORY_MB=${MACVM_MEMORY_MB:-6144}
+DISK_GB=${MACVM_DISK_GB:-50}
+D="$HOME/.macvm/$NAME"         # this VM's key, known host, guest account name and log
+KEY="$D/id_ed25519"
+
+help() {
+  cat <<HELP
+macvm: a personal macOS virtual machine (VM) on this Mac.
+
+A VM is a whole second Mac running in a window on this one: its own macOS, apps, files and
+accounts, kept apart from yours. macvm makes one from Apple's own macOS installer, using the
+free tool tart (https://tart.run), and starts, stops and logs in to it.
+
+GETTING STARTED (once)
+  macvm create         Downloads macOS from Apple (15-20 GB) and installs it into a new VM,
+                       then opens the VM's window. In that window you answer macOS's usual
+                       first-start questions (about ten minutes): language, a new account and
+                       password. Then, inside the VM, turn on System Settings > General >
+                       Sharing > Remote Login. Back here, macvm asks the account name and
+                       its password once, so later logins need no password.
+
+EVERY DAY
+  macvm up             Start the VM, in a window.
+  macvm up --headless  Start it without a window (use macvm ssh to work in it).
+  macvm ssh            Open a terminal inside the VM. Type exit to leave it.
+  macvm ssh <command>  Run one command inside the VM, e.g. macvm ssh sw_vers
+  macvm down           Shut the VM down. Its files stay; macvm up starts it again.
+  macvm status         Whether it is running, and its network address.
+
+IF SOMETHING WENT WRONG
+  macvm key            Redo the end of create (the account name and the login key), e.g.
+                       after create stopped half way. Start the VM first: macvm up.
+  macvm help           This text.
+
+SETTINGS (optional; put them before the command, e.g. MACVM_NAME=test macvm create)
+  MACVM_NAME       [$NAME]  the VM's name; use different names for several VMs
+  MACVM_IMAGE      [latest]  the newest macOS this Mac supports, or a path/URL to an .ipsw file
+  MACVM_CPU        [4]  processor cores it may use
+  MACVM_MEMORY_MB  [6144]  memory it takes from this Mac while running, in MB
+  MACVM_DISK_GB    [50]  largest size its disk may grow to; it uses only what is written
+  CPU, memory and disk apply to create only.
+
+GOOD TO KNOW
+  - Disk: the VM takes about 25-30 GB to start. The installer download stays cached in
+    ~/.tart/cache until you run: tart prune --entries=caches
+  - The VM can reach the internet and your local network, but not this Mac's files.
+  - Update macOS inside the VM as on any Mac: System Settings > General > Software Update.
+  - macvm never deletes a VM. To delete one for good: tart delete <name>, then remove
+    the folder ~/.macvm/<name> (the VM's login key and notes).
+  - tart list shows every VM on this Mac.
+HELP
+}
+die() { echo "macvm: $*" >&2; exit 1; }
+exists() { tart get "$NAME" >/dev/null 2>&1; }
+# Running means a `tart run` of this VM exists: `tart ip` also answers from a stopped VM's last lease.
+running() { pgrep -f "tart run $NAME( |\$)" >/dev/null; }
+guest_user() { cat "$D/user" 2>/dev/null; }
+vm_ssh() {
+  ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$D/known_hosts" "$@"
+}
+port_open() { nc -z -G 3 "$1" 22 2>/dev/null; }
+# Ask the guest account's name, then install this Mac's key in it (its password asked once).
+setup_key() {
+  printf 'The account name you created in the VM (short name, as in /Users/<name>): '
+  read -r user
+  [ -n "$user" ] || die "no account name given; 'macvm key' asks again"
+  echo "$user" > "$D/user"
+  printf 'Press Enter once Remote Login is on (System Settings > General > Sharing). '
+  read -r _
+  ip=$(tart ip "$NAME" --wait 120) || die "the VM has no address: is it running? ('macvm up', then 'macvm key')"
+  n=0
+  until port_open "$ip"; do
+    n=$((n + 1)); [ "$n" -le 24 ] || die "no answer on the VM's port 22: is Remote Login on? Then 'macvm key'"
+    sleep 5
+  done
+  [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C "macvm-$NAME" -f "$KEY"
+  echo "The VM account's password, once, to install this Mac's key:"
+  vm_ssh "$user@$ip" 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < "$KEY.pub" \
+    || die "could not install the key; 'macvm key' tries again"
+  vm_ssh -o BatchMode=yes "$user@$ip" true || die "key login failed; 'macvm key' tries again"
+}
+start() {  # $1: extra `tart run` flags
+  # shellcheck disable=SC2086
+  nohup tart run "$NAME" $1 >> "$D/vm.log" 2>&1 &
+}
+
+case "${1:-}" in help|-h|--help) help; exit 0 ;; esac
+command -v tart >/dev/null 2>&1 || die "tart is not installed (https://tart.run)"
+[ "$(uname -s)" = Darwin ] || die "macOS only"
+
+case "${1:-status}" in
+create)
+  exists && die "a VM named '$NAME' already exists (another name: MACVM_NAME=...)"
+  mkdir -p "$D" && chmod 700 "$D"
+  echo "Installing macOS ($IMAGE) into '$NAME': $CPU CPUs, $MEMORY_MB MB memory, $DISK_GB GB disk."
+  echo "With 'latest' this downloads Apple's restore image first (about 15-20 GB, cached by tart)."
+  tart create --from-ipsw "$IMAGE" --disk-size "$DISK_GB" "$NAME" || die "tart create failed"
+  tart set "$NAME" --cpu "$CPU" --memory "$MEMORY_MB" || die "tart set failed"
+  start ""
+  cat <<'STEPS'
+
+The VM's window is opening. In it, finish macOS's first-boot setup:
+  1. Pick language and region; skip Apple Account sign-in if you like (it can be added later).
+  2. Create a local account and password: you log in to the VM as this account.
+  3. Decline what you do not want shared (location, analytics, Siri).
+  4. Once on the desktop: System Settings > General > Sharing > turn on Remote Login.
+STEPS
+  echo
+  setup_key
+  echo "Done: 'macvm ssh' logs in, 'macvm down' stops the VM, 'macvm up' starts it again." ;;
+up)
+  exists || die "no VM named '$NAME' ('macvm create' first)"
+  mkdir -p "$D"
+  if running; then echo "$NAME already running"; exit 0; fi
+  if [ "${2:-}" = --headless ]; then start "--no-graphics"; else start ""; fi
+  echo "$NAME starting" ;;
+down)
+  running || { echo "$NAME not running"; exit 0; }
+  tart stop "$NAME" && echo "$NAME stopped" ;;
+status)
+  exists || { echo "no VM named '$NAME'"; exit 0; }
+  if running && ip=$(tart ip "$NAME" 2>/dev/null); then echo "$NAME running at $ip"; else echo "$NAME not running"; fi ;;
+key)
+  exists || die "no VM named '$NAME' ('macvm create' first)"
+  mkdir -p "$D" && chmod 700 "$D"
+  running || die "$NAME is not running ('macvm up')"
+  setup_key && echo "key works: 'macvm ssh' logs in" ;;
+ssh)
+  user=$(guest_user); [ -n "$user" ] || die "no account name saved for '$NAME' ('macvm create' sets it)"
+  running || die "$NAME is not running ('macvm up')"
+  ip=$(tart ip "$NAME" --wait 120) || die "the VM has no address yet"
+  shift
+  vm_ssh "$user@$ip" "$@" ;;
+*)
+  echo "macvm: unknown command '$1' (macvm help explains them all)" >&2; exit 2 ;;
+esac

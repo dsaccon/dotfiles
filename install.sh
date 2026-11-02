@@ -15,6 +15,7 @@
 #                          ~/.cargo/config.toml, cargo-deny pinned (needs cargo)
 #   claude  claude/hooks -> ~/.claude/hooks/dependency-gate.sh, plus its
 #                          PreToolUse entry merged into ~/.claude/settings.json
+#   macvm   macvm/macvm  -> ~/.local/bin/macvm (macOS only)
 #
 # Idempotent: safe to re-run. Overwrites existing symlinks; backs up
 # existing real files (or directories) before replacing them. Works
@@ -23,7 +24,7 @@
 set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPONENTS=(tmux vim nvim mdview cargo claude)
+COMPONENTS=(tmux vim nvim mdview cargo claude macvm)
 CARGO_DENY_VERSION=0.20.2
 
 usage() {
@@ -42,6 +43,7 @@ Components:
                           cargo-deny pinned; skipped if cargo is absent
   claude  claude/hooks -> ~/.claude/hooks/dependency-gate.sh, plus its
                           PreToolUse entry merged into ~/.claude/settings.json
+  macvm   macvm/macvm  -> ~/.local/bin/macvm; skipped if not macOS
 
 Examples:
   $(basename "$0")               # install everything
@@ -110,6 +112,20 @@ install_mdview() {
       echo "          install it from: https://github.com/charmbracelet/glow#installation"
     fi
   fi
+}
+
+install_macvm() {
+  # A macOS VM helper (macvm/README.md): Apple Silicon Macs only.
+  if [[ "$(uname -s)" != Darwin ]]; then
+    echo "  skip:   macvm is for macOS"
+    return 0
+  fi
+  link "$DOTFILES_DIR/macvm/macvm" "$HOME/.local/bin/macvm"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "  note:   ~/.local/bin is not on PATH; add it to use macvm by name" ;;
+  esac
+  command -v tart >/dev/null 2>&1 || echo "  note:   macvm needs tart: https://tart.run"
 }
 
 install_cargo() {
