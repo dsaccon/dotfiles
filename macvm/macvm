@@ -6,6 +6,7 @@
 #   macvm up [--headless]  start the VM (with a window unless --headless)
 #   macvm down             stop the VM
 #   macvm status           whether it runs, and its address
+#   macvm list             every VM on this Mac (tart's list), and which ones macvm set up
 #   macvm ssh [command]    log in to the VM by key (or run one command there)
 #   macvm key              (re)do create's last part: save the account name, install this Mac's key
 #   macvm help             everything above, for a beginner
@@ -45,6 +46,8 @@ EVERY DAY
   macvm ssh <command>  Run one command inside the VM, e.g. macvm ssh sw_vers
   macvm down           Shut the VM down. Its files stay; macvm up starts it again.
   macvm status         Whether it is running, and its network address.
+  macvm list           Every VM on this Mac, macvm's or not (also: macvm ls), with its disk
+                       size and whether it is running. macvm's own are named below the list.
 
 IF SOMETHING WENT WRONG
   macvm key            Redo the end of create (the account name and the login key), e.g.
@@ -66,7 +69,6 @@ GOOD TO KNOW
   - Update macOS inside the VM as on any Mac: System Settings > General > Software Update.
   - macvm never deletes a VM. To delete one for good: tart delete <name>, then remove
     the folder ~/.macvm/<name> (the VM's login key and notes).
-  - tart list shows every VM on this Mac.
 HELP
 }
 die() { echo "macvm: $*" >&2; exit 1; }
@@ -144,6 +146,10 @@ key)
   mkdir -p "$D" && chmod 700 "$D"
   running || die "$NAME is not running ('macvm up')"
   setup_key && echo "key works: 'macvm ssh' logs in" ;;
+list|ls)
+  tart list
+  made=$(ls "$HOME/.macvm" 2>/dev/null | tr '\n' ' ')
+  echo; echo "Set up by macvm: ${made:-none}" ;;
 ssh)
   user=$(guest_user); [ -n "$user" ] || die "no account name saved for '$NAME' ('macvm create' sets it)"
   running || die "$NAME is not running ('macvm up')"

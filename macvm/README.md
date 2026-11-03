@@ -10,6 +10,7 @@ macvm up               # start it, with a window (--headless: without)
 macvm ssh              # log in by key; `macvm ssh <command>` runs one command
 macvm down             # stop it
 macvm status           # running or not, and its address
+macvm list             # every VM on this Mac, and which ones macvm set up (also: ls)
 macvm help             # every command and setting, explained
 macvm key              # redo create's last part (account name, key) if it was interrupted
 ```
