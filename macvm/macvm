@@ -1,124 +1,222 @@
 #!/bin/bash
-# macvm — one general-purpose macOS VM on an Apple Silicon Mac, built with tart from Apple's
-# own restore image. macOS's own bash 3.2; no bash-4 features.
+# macvm — personal VMs on an Apple Silicon Mac, built with tart: macOS from Apple's own restore
+# image, or Ubuntu Server LTS from Ubuntu's own installer. macOS's own bash 3.2; no bash-4 features.
 #
-#   macvm create           install macOS into a new VM, walk the first-boot setup, enable key login
-#   macvm up [--headless]  start the VM (with a window unless --headless)
-#   macvm down             stop the VM
-#   macvm status           whether it runs, and its address
-#   macvm list             every VM on this Mac (tart's list), and which ones macvm set up
-#   macvm ssh [command]    log in to the VM by key (or run one command there)
-#   macvm key              (re)do create's last part: save the account name, install this Mac's key
-#   macvm help             everything above, for a beginner
+#   macvm create [--linux] [name]   install a new VM, walk its first-boot setup, enable key login
+#   macvm up [name] [--headless|--window]
+#                                   start a VM (macOS: with a window; Linux: without)
+#   macvm down [name]               stop a VM
+#   macvm status [name]             whether it runs, and its address
+#   macvm list                      every VM on this Mac (tart's list), and which ones macvm set up
+#   macvm ssh [name] [command]      log in to a VM by key (or run one command there)
+#   macvm key [name]                (re)do create's last part: save the account name, install the key
+#   macvm help                      everything above, for a beginner
 #
-# Settings, from the environment (defaults in brackets):
-#   MACVM_NAME [macvm]  MACVM_IMAGE [latest]  MACVM_CPU [4]  MACVM_MEMORY_MB [6144]  MACVM_DISK_GB [50]
+# The name defaults to MACVM_NAME, else `macvm` (`ubuntu` for `create --linux`). Other settings, from
+# the environment, apply to create: MACVM_CPU, MACVM_MEMORY_MB, MACVM_DISK_GB (macOS 4 / 6144 / 50,
+# Linux 2 / 4096 / 20), MACVM_IMAGE [latest] (macOS), MACVM_UBUNTU [26.04] (Linux).
 # Deleting a VM is left to you: `tart delete <name>`, then remove ~/.macvm/<name>.
 set -u
-NAME=${MACVM_NAME:-macvm}
-IMAGE=${MACVM_IMAGE:-latest}   # `latest`: the newest macOS this Mac can host; or an .ipsw path or URL
-CPU=${MACVM_CPU:-4}
-MEMORY_MB=${MACVM_MEMORY_MB:-6144}
-DISK_GB=${MACVM_DISK_GB:-50}
-D="$HOME/.macvm/$NAME"         # this VM's key, known host, guest account name and log
-KEY="$D/id_ed25519"
+ROOT="$HOME/.macvm"            # one folder per VM, plus .images (downloaded Linux installers)
+UBUNTU=${MACVM_UBUNTU:-26.04}  # an Ubuntu LTS release; its newest point release is used
+UBUNTU_BASE="https://cdimage.ubuntu.com/ubuntu/releases/$UBUNTU/release"
 
 help() {
-  cat <<HELP
-macvm: a personal macOS virtual machine (VM) on this Mac.
+  cat <<'HELP'
+macvm: personal virtual machines (VMs) on this Mac.
 
-A VM is a whole second Mac running in a window on this one: its own macOS, apps, files and
-accounts, kept apart from yours. macvm makes one from Apple's own macOS installer, using the
-free tool tart (https://tart.run), and starts, stops and logs in to it.
+A VM is a whole second computer running inside this one: its own system, apps, files and
+accounts, kept apart from yours. macvm makes two kinds, using the free tool tart
+(https://tart.run), and starts, stops and logs in to them:
+  - macOS, from Apple's own installer: a second Mac, in a window.
+  - Ubuntu Server (Linux), from Ubuntu's own installer: no desktop; you work in it by terminal.
 
-GETTING STARTED (once)
-  macvm create         Downloads macOS from Apple (15-20 GB) and installs it into a new VM,
-                       then opens the VM's window. In that window you answer macOS's usual
-                       first-start questions (about ten minutes): language, a new account and
-                       password. Then, inside the VM, turn on System Settings > General >
-                       Sharing > Remote Login. Back here, macvm asks the account name and
-                       its password once, so later logins need no password.
+GETTING STARTED (once per VM)
+  macvm create         A macOS VM named macvm. Downloads macOS from Apple (15-20 GB), installs
+                       it and opens the VM's window. There you answer macOS's usual first-start
+                       questions (about ten minutes): language, a new account and password.
+                       Then, inside the VM, turn on System Settings > General > Sharing >
+                       Remote Login. Back here, macvm asks the account name and its password
+                       once, so later logins need no password.
+  macvm create --linux An Ubuntu Server VM named ubuntu. Downloads Ubuntu's installer (about
+                       3 GB, checked against Ubuntu's published checksum) and opens it in a
+                       window. Answer its questions (about ten minutes); the one that matters:
+                       tick "Install OpenSSH server". When it says it is done, choose
+                       "Reboot Now", then come back here and press Enter: macvm restarts the
+                       VM without the installer and sets up the password-less login.
+  macvm create --linux dev    The same, with your own name for the VM (here: dev).
 
-EVERY DAY
-  macvm up             Start the VM, in a window.
-  macvm up --headless  Start it without a window (use macvm ssh to work in it).
-  macvm ssh            Open a terminal inside the VM. Type exit to leave it.
-  macvm ssh <command>  Run one command inside the VM, e.g. macvm ssh sw_vers
-  macvm down           Shut the VM down. Its files stay; macvm up starts it again.
-  macvm status         Whether it is running, and its network address.
+EVERY DAY (the name can be left out for the VM named macvm)
+  macvm up ubuntu      Start a VM. macOS opens in a window; Linux starts without one.
+                       --headless: no window; --window: a window (Linux: its console).
+  macvm ssh ubuntu     Open a terminal inside it. Type exit to leave.
+  macvm ssh ubuntu uname -a    Run one command inside it.
+  macvm down ubuntu    Shut it down. Its files stay; macvm up starts it again.
+  macvm status ubuntu  Whether it is running, and its network address.
   macvm list           Every VM on this Mac, macvm's or not (also: macvm ls), with its disk
                        size and whether it is running. macvm's own are named below the list.
 
 IF SOMETHING WENT WRONG
-  macvm key            Redo the end of create (the account name and the login key), e.g.
-                       after create stopped half way. Start the VM first: macvm up.
+  macvm key ubuntu     Redo the end of create (the account name and the login key), e.g.
+                       after create stopped half way. Start the VM first: macvm up ubuntu.
   macvm help           This text.
 
-SETTINGS (optional; put them before the command, e.g. MACVM_NAME=test macvm create)
-  MACVM_NAME       [$NAME]  the VM's name; use different names for several VMs
-  MACVM_IMAGE      [latest]  the newest macOS this Mac supports, or a path/URL to an .ipsw file
-  MACVM_CPU        [4]  processor cores it may use
-  MACVM_MEMORY_MB  [6144]  memory it takes from this Mac while running, in MB
-  MACVM_DISK_GB    [50]  largest size its disk may grow to; it uses only what is written
-  CPU, memory and disk apply to create only.
+SETTINGS (optional; put them before the command, e.g. MACVM_DISK_GB=40 macvm create --linux)
+  MACVM_NAME       the default VM name instead of macvm
+  MACVM_CPU        processor cores it may use               [macOS 4, Linux 2]
+  MACVM_MEMORY_MB  memory it takes while running, in MB     [macOS 6144, Linux 4096]
+  MACVM_DISK_GB    largest size its disk may grow to         [macOS 50, Linux 20]
+                   (it uses only what is written)
+  MACVM_IMAGE      macOS version: latest (the newest this Mac supports), or an .ipsw path/URL
+  MACVM_UBUNTU     Ubuntu LTS release [26.04]; its newest update is used
+  These apply to create only.
 
 GOOD TO KNOW
-  - Disk: the VM takes about 25-30 GB to start. The installer download stays cached in
-    ~/.tart/cache until you run: tart prune --entries=caches --space-budget=0
-  - The VM can reach the internet and your local network, but not this Mac's files.
-  - Update macOS inside the VM as on any Mac: System Settings > General > Software Update.
+  - Disk: a macOS VM takes about 25-30 GB, an Ubuntu Server VM about 4-6 GB. Downloads are
+    kept for the next create: macOS's in ~/.tart/cache (remove with
+    tart prune --entries=caches --space-budget=0), Ubuntu's in ~/.macvm/.images.
+  - Linux VMs run Arm (aarch64) Linux, as Arm Macs do; most software has Arm builds.
+  - A VM can reach the internet and your local network, but not this Mac's files.
+  - Update a VM from inside it: macOS in System Settings > General > Software Update;
+    Ubuntu with: sudo apt update && sudo apt upgrade
   - macvm never deletes a VM. To delete one for good: tart delete <name>, then remove
-    the folder ~/.macvm/<name> (the VM's login key and notes).
+    the folder ~/.macvm/<name> (its login key and notes).
 HELP
 }
 die() { echo "macvm: $*" >&2; exit 1; }
 exists() { tart get "$NAME" >/dev/null 2>&1; }
 # Running means a `tart run` of this VM exists: `tart ip` also answers from a stopped VM's last lease.
 running() { pgrep -f "tart run $NAME( |\$)" >/dev/null; }
-guest_user() { cat "$D/user" 2>/dev/null; }
+os_of() { cat "$D/os" 2>/dev/null || echo macos; }  # VMs made before Linux support are macOS
 vm_ssh() {
   ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$D/known_hosts" "$@"
 }
 port_open() { nc -z -G 3 "$1" 22 2>/dev/null; }
+start() {  # $1: extra `tart run` flags
+  # shellcheck disable=SC2086
+  nohup tart run "$NAME" $1 >> "$D/vm.log" 2>&1 &
+}
+stop() {
+  tart stop "$NAME" >/dev/null 2>&1
+  n=0  # the `tart run` process outlives `tart stop` briefly
+  while running && [ "$n" -lt 30 ]; do sleep 2; n=$((n + 1)); done
+}
 # Ask the guest account's name, then install this Mac's key in it (its password asked once).
 setup_key() {
-  printf 'The account name you created in the VM (short name, as in /Users/<name>): '
+  if [ "$(os_of)" = linux ]; then
+    printf 'The username you created in the installer: '
+  else
+    printf 'The account name you created in the VM (short name, as in /Users/<name>): '
+  fi
   read -r user
-  [ -n "$user" ] || die "no account name given; 'macvm key' asks again"
+  [ -n "$user" ] || die "no account name given; 'macvm key $NAME' asks again"
   echo "$user" > "$D/user"
-  printf 'Press Enter once Remote Login is on (System Settings > General > Sharing). '
-  read -r _
-  ip=$(tart ip "$NAME" --wait 120) || die "the VM has no address: is it running? ('macvm up', then 'macvm key')"
+  if [ "$(os_of)" = macos ]; then
+    printf 'Press Enter once Remote Login is on (System Settings > General > Sharing). '
+    read -r _
+  fi
+  ip=$(tart ip "$NAME" --wait 180) || die "the VM has no address: is it running? ('macvm up $NAME', then 'macvm key $NAME')"
   n=0
   until port_open "$ip"; do
-    n=$((n + 1)); [ "$n" -le 24 ] || die "no answer on the VM's port 22: is Remote Login on? Then 'macvm key'"
+    n=$((n + 1)); [ "$n" -le 36 ] || die "no answer on the VM's port 22 (SSH not on?); then 'macvm key $NAME'"
     sleep 5
   done
   [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C "macvm-$NAME" -f "$KEY"
   echo "The VM account's password, once, to install this Mac's key:"
   vm_ssh "$user@$ip" 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < "$KEY.pub" \
-    || die "could not install the key; 'macvm key' tries again"
-  vm_ssh -o BatchMode=yes "$user@$ip" true || die "key login failed; 'macvm key' tries again"
+    || die "could not install the key; 'macvm key $NAME' tries again"
+  vm_ssh -o BatchMode=yes "$user@$ip" true || die "key login failed; 'macvm key $NAME' tries again"
 }
-start() {  # $1: extra `tart run` flags
-  # shellcheck disable=SC2086
-  nohup tart run "$NAME" $1 >> "$D/vm.log" 2>&1 &
+# The newest point release of $UBUNTU's ARM64 server installer, checked against Ubuntu's SHA256SUMS
+# (fetched over HTTPS from the same server); kept in $ROOT/.images for the next create.
+ubuntu_iso() {
+  sums=$(curl -fsSL "$UBUNTU_BASE/SHA256SUMS") || die "cannot read Ubuntu's checksum list ($UBUNTU_BASE)"
+  names=$(printf '%s\n' "$sums" | sed -n 's/^[0-9a-f]* \*\(ubuntu-[0-9.]*-live-server-arm64\.iso\)$/\1/p')
+  file=$( (printf '%s\n' "$names" | sort -V) 2>/dev/null | tail -n 1)
+  [ -n "$file" ] || file=$(printf '%s\n' "$names" | sort | tail -n 1)
+  [ -n "$file" ] || die "no ARM64 server installer listed for Ubuntu $UBUNTU"
+  want=$(printf '%s\n' "$sums" | grep " \*$file\$" | cut -d' ' -f1)
+  iso="$ROOT/.images/$file"
+  mkdir -p "$ROOT/.images"
+  if [ -f "$iso" ] && [ "$(shasum -a 256 "$iso" | cut -d' ' -f1)" = "$want" ]; then
+    echo "Using the installer downloaded before: $file" >&2
+  else
+    echo "Downloading $file from Ubuntu (about 3 GB)..." >&2
+    curl -fL --progress-bar -o "$iso.part" "$UBUNTU_BASE/$file" || die "download failed"
+    [ "$(shasum -a 256 "$iso.part" | cut -d' ' -f1)" = "$want" ] \
+      || die "the download does not match Ubuntu's checksum; not used (left as $iso.part)"
+    mv "$iso.part" "$iso"
+    echo "Checksum matches Ubuntu's." >&2
+  fi
+  echo "$iso"
 }
 
 case "${1:-}" in help|-h|--help) help; exit 0 ;; esac
 command -v tart >/dev/null 2>&1 || die "tart is not installed (https://tart.run)"
 [ "$(uname -s)" = Darwin ] || die "macOS only"
 
-case "${1:-status}" in
+cmd=${1:-status}; [ $# -gt 0 ] && shift
+linux=0 window=""
+if [ "$cmd" = ssh ]; then
+  # `ssh [name] [command]`: the first word is a name only if macvm set up a VM by that name.
+  NAME=${MACVM_NAME:-macvm}
+  if [ $# -gt 0 ] && [ -f "$ROOT/$1/user" ]; then NAME=$1; shift; fi
+else
+  NAME=""
+  for a in "$@"; do
+    case $a in
+      --linux) linux=1 ;;
+      --headless) window=no ;;
+      --window) window=yes ;;
+      -*) die "unknown option '$a' (macvm help)" ;;
+      *) [ -z "$NAME" ] || die "one VM name at a time"; NAME=$a ;;
+    esac
+  done
+  if [ -z "$NAME" ]; then
+    if [ "$cmd" = create ] && [ "$linux" = 1 ]; then NAME=${MACVM_NAME:-ubuntu}; else NAME=${MACVM_NAME:-macvm}; fi
+  fi
+fi
+case $NAME in .*|*/*) die "'$NAME' is not a usable VM name" ;; esac
+D="$ROOT/$NAME"                # this VM's key, known host, guest account name, OS and log
+KEY="$D/id_ed25519"
+
+case $cmd in
 create)
-  exists && die "a VM named '$NAME' already exists (another name: MACVM_NAME=...)"
+  exists && die "a VM named '$NAME' already exists (another name: macvm create [--linux] <name>)"
   mkdir -p "$D" && chmod 700 "$D"
-  echo "Installing macOS ($IMAGE) into '$NAME': $CPU CPUs, $MEMORY_MB MB memory, $DISK_GB GB disk."
-  echo "With 'latest' this downloads Apple's restore image first (about 15-20 GB, cached by tart)."
-  tart create --from-ipsw "$IMAGE" --disk-size "$DISK_GB" "$NAME" || die "tart create failed"
-  tart set "$NAME" --cpu "$CPU" --memory "$MEMORY_MB" || die "tart set failed"
-  start ""
-  cat <<'STEPS'
+  if [ "$linux" = 1 ]; then
+    CPU=${MACVM_CPU:-2} MEMORY_MB=${MACVM_MEMORY_MB:-4096} DISK_GB=${MACVM_DISK_GB:-20}
+    iso=$(ubuntu_iso) || exit 1
+    echo "Creating '$NAME' (Ubuntu Server $UBUNTU): $CPU CPUs, $MEMORY_MB MB memory, $DISK_GB GB disk."
+    tart create --linux --disk-size "$DISK_GB" "$NAME" || die "tart create failed"
+    echo linux > "$D/os"
+    tart set "$NAME" --cpu "$CPU" --memory "$MEMORY_MB" || die "tart set failed"
+    start "--disk=$iso"
+    cat <<'STEPS'
+
+The VM's window is opening with Ubuntu's installer. In it (keyboard only: arrows, Tab, Space,
+Enter), accept the defaults except:
+  1. Your name, the server's name, a username and a password: you log in as this user.
+  2. Skip Ubuntu Pro.
+  3. SSH: tick "Install OpenSSH server" (Space on it). Without it macvm cannot log in.
+  4. Featured snaps: none needed.
+When it shows "Installation complete!", choose "Reboot Now".
+STEPS
+    printf '\nPress Enter here once you chose "Reboot Now". '
+    read -r _
+    stop
+    start "--no-graphics"  # from now on without the installer
+    echo "Restarted '$NAME' from its own disk."
+  else
+    CPU=${MACVM_CPU:-4} MEMORY_MB=${MACVM_MEMORY_MB:-6144} DISK_GB=${MACVM_DISK_GB:-50}
+    IMAGE=${MACVM_IMAGE:-latest}  # `latest`: the newest macOS this Mac can host; or an .ipsw path or URL
+    echo "Installing macOS ($IMAGE) into '$NAME': $CPU CPUs, $MEMORY_MB MB memory, $DISK_GB GB disk."
+    echo "With 'latest' this downloads Apple's restore image first (about 15-20 GB, cached by tart)."
+    tart create --from-ipsw "$IMAGE" --disk-size "$DISK_GB" "$NAME" || die "tart create failed"
+    echo macos > "$D/os"
+    tart set "$NAME" --cpu "$CPU" --memory "$MEMORY_MB" || die "tart set failed"
+    start ""
+    cat <<'STEPS'
 
 The VM's window is opening. In it, finish macOS's first-boot setup:
   1. Pick language and region; skip Apple Account sign-in if you like (it can be added later).
@@ -126,36 +224,43 @@ The VM's window is opening. In it, finish macOS's first-boot setup:
   3. Decline what you do not want shared (location, analytics, Siri).
   4. Once on the desktop: System Settings > General > Sharing > turn on Remote Login.
 STEPS
+  fi
   echo
   setup_key
-  echo "Done: 'macvm ssh' logs in, 'macvm down' stops the VM, 'macvm up' starts it again." ;;
+  echo "Done: 'macvm ssh $NAME' logs in, 'macvm down $NAME' stops it, 'macvm up $NAME' starts it again." ;;
 up)
   exists || die "no VM named '$NAME' ('macvm create' first)"
   mkdir -p "$D"
   if running; then echo "$NAME already running"; exit 0; fi
-  if [ "${2:-}" = --headless ]; then start "--no-graphics"; else start ""; fi
+  [ -n "$window" ] || { if [ "$(os_of)" = linux ]; then window=no; else window=yes; fi; }
+  if [ "$window" = no ]; then start "--no-graphics"; else start ""; fi
   echo "$NAME starting" ;;
 down)
   running || { echo "$NAME not running"; exit 0; }
-  tart stop "$NAME" && echo "$NAME stopped" ;;
+  stop && echo "$NAME stopped" ;;
 status)
   exists || { echo "no VM named '$NAME'"; exit 0; }
   if running && ip=$(tart ip "$NAME" 2>/dev/null); then echo "$NAME running at $ip"; else echo "$NAME not running"; fi ;;
 key)
   exists || die "no VM named '$NAME' ('macvm create' first)"
   mkdir -p "$D" && chmod 700 "$D"
-  running || die "$NAME is not running ('macvm up')"
-  setup_key && echo "key works: 'macvm ssh' logs in" ;;
+  running || die "$NAME is not running ('macvm up $NAME')"
+  setup_key && echo "key works: 'macvm ssh $NAME' logs in" ;;
 list|ls)
   tart list
-  made=$(ls "$HOME/.macvm" 2>/dev/null | tr '\n' ' ')
+  made=""
+  for d in "$ROOT"/*/; do
+    [ -d "$d" ] || continue
+    n=$(basename "$d"); o=$(cat "$d/os" 2>/dev/null || echo macos)
+    if [ "$o" = linux ]; then o=Linux; else o=macOS; fi
+    made="$made$n ($o)  "
+  done
   echo; echo "Set up by macvm: ${made:-none}" ;;
 ssh)
-  user=$(guest_user); [ -n "$user" ] || die "no account name saved for '$NAME' ('macvm create' sets it)"
-  running || die "$NAME is not running ('macvm up')"
+  [ -n "$(cat "$D/user" 2>/dev/null)" ] || die "no account name saved for '$NAME' ('macvm create' sets it)"
+  running || die "$NAME is not running ('macvm up $NAME')"
   ip=$(tart ip "$NAME" --wait 120) || die "the VM has no address yet"
-  shift
-  vm_ssh "$user@$ip" "$@" ;;
+  vm_ssh "$(cat "$D/user")@$ip" "$@" ;;
 *)
-  echo "macvm: unknown command '$1' (macvm help explains them all)" >&2; exit 2 ;;
+  echo "macvm: unknown command '$cmd' (macvm help explains them all)" >&2; exit 2 ;;
 esac
