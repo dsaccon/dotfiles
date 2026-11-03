@@ -18,7 +18,7 @@ macvm help                   # every command and setting, explained
 macvm key [name]             # redo create's last part (account name, key) if it was interrupted
 ```
 
-The name can be left out for the VM named `macvm` (or `MACVM_NAME`).
+With only one VM the name can be left out; with several, macvm asks which.
 
 ## Creating one
 

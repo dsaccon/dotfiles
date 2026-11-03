@@ -12,7 +12,8 @@
 #   macvm key [name]                (re)do create's last part: save the account name, install the key
 #   macvm help                      everything above, for a beginner
 #
-# The name defaults to MACVM_NAME, else `macvm` (`ubuntu` for `create --linux`). Other settings, from
+# With no name: MACVM_NAME, else the only VM macvm set up (several: it asks which); create's default is
+# `macvm` (`ubuntu` with --linux). Other settings, from
 # the environment, apply to create: MACVM_CPU, MACVM_MEMORY_MB, MACVM_DISK_GB (macOS 4 / 6144 / 50,
 # Linux 2 / 4096 / 20), MACVM_IMAGE [latest] (macOS), MACVM_UBUNTU [26.04] (Linux).
 # Deleting a VM is left to you: `tart delete <name>`, then remove ~/.macvm/<name>.
@@ -31,6 +32,13 @@ accounts, kept apart from yours. macvm makes two kinds, using the free tool tart
   - macOS, from Apple's own installer: a second Mac, in a window.
   - Ubuntu Server (Linux), from Ubuntu's own installer: no desktop; you work in it by terminal.
 
+IN SHORT: every command is  macvm <what> <which VM>
+  macvm list           see your VMs, and whether each is running
+  macvm up <name>      start a stopped VM
+  macvm ssh <name>     log in to it (type exit to leave)
+  macvm down <name>    stop it
+  With only one VM, the name can be left out. With several, macvm asks which.
+
 GETTING STARTED (once per VM)
   macvm create         A macOS VM named macvm. Downloads macOS from Apple (15-20 GB), installs
                        it and opens the VM's window. There you answer macOS's usual first-start
@@ -46,7 +54,7 @@ GETTING STARTED (once per VM)
                        VM without the installer and sets up the password-less login.
   macvm create --linux dev    The same, with your own name for the VM (here: dev).
 
-EVERY DAY (the name can be left out for the VM named macvm)
+EVERY DAY
   macvm up ubuntu      Start a VM. macOS opens in a window; Linux starts without one.
                        --headless: no window; --window: a window (Linux: its console).
   macvm ssh ubuntu     Open a terminal inside it. Type exit to leave.
@@ -92,9 +100,13 @@ vm_ssh() {
   ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$D/known_hosts" "$@"
 }
 port_open() { nc -z -G 3 "$1" 22 2>/dev/null; }
+# The VM runs in its own process group (job control on), so a Ctrl-C in this terminal, which
+# reaches the terminal's foreground group, does not stop it.
 start() {  # $1: extra `tart run` flags
+  set -m
   # shellcheck disable=SC2086
   nohup tart run "$NAME" $1 >> "$D/vm.log" 2>&1 &
+  set +m
 }
 stop() {
   tart stop "$NAME" >/dev/null 2>&1
@@ -151,16 +163,28 @@ ubuntu_iso() {
   echo "$iso"
 }
 
-case "${1:-}" in help|-h|--help) help; exit 0 ;; esac
+case "${1:-help}" in help|-h|--help) help; exit 0 ;; esac
 command -v tart >/dev/null 2>&1 || die "tart is not installed (https://tart.run)"
 [ "$(uname -s)" = Darwin ] || die "macOS only"
 
-cmd=${1:-status}; [ $# -gt 0 ] && shift
+# The VMs macvm set up, one name per line.
+made_vms() { for d in "$ROOT"/*/; do [ -d "$d" ] && basename "$d"; done; }
+# No name given: MACVM_NAME, else the only VM macvm set up; with several, ask which.
+default_name() {
+  [ -z "${MACVM_NAME:-}" ] || { echo "$MACVM_NAME"; return; }
+  vms=$(made_vms)
+  case $(printf '%s' "$vms" | grep -c .) in
+    0) echo macvm ;;
+    1) echo "$vms" ;;
+    *) die "which VM? $(echo $vms | sed 's/ /, /g'). Say it: macvm $cmd <name>" ;;
+  esac
+}
+
+cmd=${1:-help}; [ $# -gt 0 ] && shift
 linux=0 window=""
 if [ "$cmd" = ssh ]; then
   # `ssh [name] [command]`: the first word is a name only if macvm set up a VM by that name.
-  NAME=${MACVM_NAME:-macvm}
-  if [ $# -gt 0 ] && [ -f "$ROOT/$1/user" ]; then NAME=$1; shift; fi
+  if [ $# -gt 0 ] && [ -f "$ROOT/$1/user" ]; then NAME=$1; shift; else NAME=$(default_name) || exit 1; fi
 else
   NAME=""
   for a in "$@"; do
@@ -173,10 +197,16 @@ else
     esac
   done
   if [ -z "$NAME" ]; then
-    if [ "$cmd" = create ] && [ "$linux" = 1 ]; then NAME=${MACVM_NAME:-ubuntu}; else NAME=${MACVM_NAME:-macvm}; fi
+    if [ "$cmd" = create ]; then
+      if [ "$linux" = 1 ]; then NAME=${MACVM_NAME:-ubuntu}; else NAME=${MACVM_NAME:-macvm}; fi
+    elif [ "$cmd" != list ] && [ "$cmd" != ls ]; then
+      NAME=$(default_name) || exit 1
+    else
+      NAME=-
+    fi
   fi
 fi
-case $NAME in .*|*/*) die "'$NAME' is not a usable VM name" ;; esac
+case $NAME in -) ;; .*|*/*) die "'$NAME' is not a usable VM name" ;; esac
 D="$ROOT/$NAME"                # this VM's key, known host, guest account name, OS and log
 KEY="$D/id_ed25519"
 
@@ -255,7 +285,8 @@ list|ls)
     if [ "$o" = linux ]; then o=Linux; else o=macOS; fi
     made="$made$n ($o)  "
   done
-  echo; echo "Set up by macvm: ${made:-none}" ;;
+  echo; echo "Set up by macvm: ${made:-none}"
+  [ -z "$made" ] || echo "Start one: macvm up <name>   Log in: macvm ssh <name>   Stop: macvm down <name>" ;;
 ssh)
   [ -n "$(cat "$D/user" 2>/dev/null)" ] || die "no account name saved for '$NAME' ('macvm create' sets it)"
   running || die "$NAME is not running ('macvm up $NAME')"
