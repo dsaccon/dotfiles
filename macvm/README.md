@@ -14,6 +14,7 @@ macvm ssh [name] [command]   # log in by key, or run one command
 macvm down [name]            # stop it
 macvm status [name]          # running or not, and its address
 macvm list                   # every VM on this Mac, and which ones macvm set up (also: ls)
+macvm delete <name>          # delete a VM macvm created, after you type its name to confirm
 macvm help                   # every command and setting, explained
 macvm key [name]             # redo create's last part (account name, key) if it was interrupted
 ```
@@ -68,7 +69,8 @@ log. `~/.macvm/.images/` holds downloaded Ubuntu installers. The VMs themselves 
   a folder, if wanted.
 - **Linux is Arm (aarch64),** as the Mac is. Most software has Arm builds.
 - **Updates:** from inside the VM (macOS: Software Update; Ubuntu: `sudo apt update && sudo apt upgrade`).
-- **Deleting:** left to you, on purpose: `tart delete <name>`, then remove `~/.macvm/<name>`.
+- **Deleting:** `macvm delete <name>` warns, asks you to type the name, then deletes the VM's disk
+  for good and moves `~/.macvm/<name>` to the Trash. It refuses VMs macvm did not create.
 - **Memory:** each running VM takes its memory from the Mac's; macOS allows at most two macOS
   VMs at once.
 

@@ -10,13 +10,13 @@
 #   macvm list                      every VM on this Mac (tart's list), and which ones macvm set up
 #   macvm ssh [name] [command]      log in to a VM by key (or run one command there)
 #   macvm key [name]                (re)do create's last part: save the account name, install the key
+#   macvm delete <name>             delete a VM macvm set up, after a typed confirmation
 #   macvm help                      everything above, for a beginner
 #
 # With no name: MACVM_NAME, else the only VM macvm set up (several: it asks which); create's default is
 # `macvm` (`ubuntu` with --linux). Other settings, from
 # the environment, apply to create: MACVM_CPU, MACVM_MEMORY_MB, MACVM_DISK_GB (macOS 4 / 6144 / 50,
 # Linux 2 / 4096 / 20), MACVM_IMAGE [latest] (macOS), MACVM_UBUNTU [26.04] (Linux).
-# Deleting a VM is left to you: `tart delete <name>`, then remove ~/.macvm/<name>.
 set -u
 ROOT="$HOME/.macvm"            # one folder per VM, plus .images (downloaded Linux installers)
 UBUNTU=${MACVM_UBUNTU:-26.04}  # an Ubuntu LTS release; its newest point release is used
@@ -63,6 +63,8 @@ EVERY DAY
   macvm status ubuntu  Whether it is running, and its network address.
   macvm list           Every VM on this Mac, macvm's or not (also: macvm ls), with its disk
                        size and whether it is running. macvm's own are named below the list.
+  macvm delete ubuntu  Delete a VM for good: its disk and everything in it. Asks you to type
+                       its name to confirm. Only VMs macvm created; never others on this Mac.
 
 IF SOMETHING WENT WRONG
   macvm key ubuntu     Redo the end of create (the account name and the login key), e.g.
@@ -87,8 +89,8 @@ GOOD TO KNOW
   - A VM can reach the internet and your local network, but not this Mac's files.
   - Update a VM from inside it: macOS in System Settings > General > Software Update;
     Ubuntu with: sudo apt update && sudo apt upgrade
-  - macvm never deletes a VM. To delete one for good: tart delete <name>, then remove
-    the folder ~/.macvm/<name> (its login key and notes).
+  - macvm delete moves the VM's login key and notes (~/.macvm/<name>) to the Trash; the
+    VM's disk itself is deleted at once and cannot be recovered.
 HELP
 }
 die() { echo "macvm: $*" >&2; exit 1; }
@@ -184,7 +186,7 @@ cmd=${1:-help}; [ $# -gt 0 ] && shift
 linux=0 window=""
 if [ "$cmd" = ssh ]; then
   # `ssh [name] [command]`: the first word is a name only if macvm set up a VM by that name.
-  if [ $# -gt 0 ] && [ -f "$ROOT/$1/user" ]; then NAME=$1; shift; else NAME=$(default_name) || exit 1; fi
+  if [ $# -gt 0 ] && [ -d "$ROOT/$1" ]; then NAME=$1; shift; else NAME=$(default_name) || exit 1; fi
 else
   NAME=""
   for a in "$@"; do
@@ -197,7 +199,9 @@ else
     esac
   done
   if [ -z "$NAME" ]; then
-    if [ "$cmd" = create ]; then
+    if [ "$cmd" = delete ]; then
+      die "say which VM to delete: macvm delete <name> (macvm list shows them)"
+    elif [ "$cmd" = create ]; then
       if [ "$linux" = 1 ]; then NAME=${MACVM_NAME:-ubuntu}; else NAME=${MACVM_NAME:-macvm}; fi
     elif [ "$cmd" != list ] && [ "$cmd" != ls ]; then
       NAME=$(default_name) || exit 1
@@ -276,6 +280,24 @@ key)
   mkdir -p "$D" && chmod 700 "$D"
   running || die "$NAME is not running ('macvm up $NAME')"
   setup_key && echo "key works: 'macvm ssh $NAME' logs in" ;;
+delete)
+  # Only a VM macvm created: its folder is the mark, so tart VMs made otherwise are never touched.
+  [ -d "$D" ] || die "'$NAME' was not created by macvm, so macvm will not delete it (macvm list)"
+  if [ "$(os_of)" = linux ]; then o=Linux; else o=macOS; fi
+  cat <<WARN
+
+WARNING: this permanently deletes the VM '$NAME' ($o): its disk and everything inside it
+(files, apps, settings). It cannot be undone. Its login key and notes go to the Trash.
+
+WARN
+  printf "Type the VM's name to confirm, or just Enter to cancel: "
+  read -r answer
+  [ "$answer" = "$NAME" ] || { echo "Cancelled; nothing deleted."; exit 1; }
+  if running; then stop; echo "$NAME stopped"; fi
+  if exists; then tart delete "$NAME" || die "tart could not delete '$NAME'"; fi
+  mkdir -p "$HOME/.Trash"
+  mv "$D" "$HOME/.Trash/macvm-$NAME-$(date +%Y%m%d-%H%M%S)" || die "VM deleted, but its folder $D could not be moved to the Trash"
+  echo "Deleted '$NAME'." ;;
 list|ls)
   tart list
   made=""
