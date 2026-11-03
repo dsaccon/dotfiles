@@ -35,7 +35,7 @@ Settings come from the environment:
 | `MACVM_DISK_GB` | `50` | a cap: the disk only takes what is written to it |
 
 Disk: a fresh macOS takes about 25–30 GB on the host; the download adds 15–20 GB until
-`tart prune --entries=caches` removes it.
+`tart prune --entries=caches --space-budget=0` removes it.
 
 ## What it keeps where
 

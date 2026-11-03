@@ -64,7 +64,7 @@ SETTINGS (optional; put them before the command, e.g. MACVM_NAME=test macvm crea
 
 GOOD TO KNOW
   - Disk: the VM takes about 25-30 GB to start. The installer download stays cached in
-    ~/.tart/cache until you run: tart prune --entries=caches
+    ~/.tart/cache until you run: tart prune --entries=caches --space-budget=0
   - The VM can reach the internet and your local network, but not this Mac's files.
   - Update macOS inside the VM as on any Mac: System Settings > General > Software Update.
   - macvm never deletes a VM. To delete one for good: tart delete <name>, then remove
