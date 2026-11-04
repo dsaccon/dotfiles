@@ -102,6 +102,25 @@ vm_ssh() {
   ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$D/known_hosts" "$@"
 }
 port_open() { nc -z -G 3 "$1" 22 2>/dev/null; }
+# Every address the Mac's DHCP server gave this VM's network card, newest first. `tart ip` alone
+# can name a stale one: installed Ubuntu identifies itself to DHCP differently from its installer.
+lease_ips() {
+  mac=$(sed -n 's/.*"macAddress" *: *"\([0-9a-fA-F:]*\)".*/\1/p' "${TART_HOME:-$HOME/.tart}/vms/$NAME/config.json" 2>/dev/null \
+    | awk -F: '{ for (i = 1; i <= NF; i++) { o = tolower($i); sub(/^0/, "", o); printf "%s%s", (i > 1 ? ":" : ""), o } }')
+  [ -n "$mac" ] || return 0
+  awk -F= -v m="1,$mac" '/ip_address=/ { ip = $2 } /hw_address=/ && $2 == m { print ip }' /var/db/dhcpd_leases 2>/dev/null
+}
+# The VM's address that answers on port 22; $1 tries, 5 s apart.
+vm_ip() {
+  n=0
+  while :; do
+    for ip in $(tart ip "$NAME" 2>/dev/null) $(lease_ips); do
+      port_open "$ip" && { echo "$ip"; return 0; }
+    done
+    n=$((n + 1)); [ "$n" -lt "$1" ] || return 1
+    sleep 5
+  done
+}
 # The VM runs in its own process group (job control on), so a Ctrl-C in this terminal, which
 # reaches the terminal's foreground group, does not stop it.
 start() {  # $1: extra `tart run` flags
@@ -129,12 +148,10 @@ setup_key() {
     printf 'Press Enter once Remote Login is on (System Settings > General > Sharing). '
     read -r _
   fi
-  ip=$(tart ip "$NAME" --wait 180) || die "the VM has no address: is it running? ('macvm up $NAME', then 'macvm key $NAME')"
-  n=0
-  until port_open "$ip"; do
-    n=$((n + 1)); [ "$n" -le 36 ] || die "no answer on the VM's port 22 (SSH not on?); then 'macvm key $NAME'"
-    sleep 5
-  done
+  echo "Waiting for the VM to answer on SSH (up to 5 minutes)..."
+  if [ "$(os_of)" = linux ]; then hint="was 'Install OpenSSH server' ticked?"; else hint="is Remote Login on?"; fi
+  ip=$(vm_ip 60) || die "the VM does not answer on SSH ($hint); then 'macvm key $NAME'"
+  echo "Found it at $ip."
   [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C "macvm-$NAME" -f "$KEY"
   echo "The VM account's password, once, to install this Mac's key:"
   vm_ssh "$user@$ip" 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < "$KEY.pub" \
@@ -274,7 +291,9 @@ down)
   stop && echo "$NAME stopped" ;;
 status)
   exists || { echo "no VM named '$NAME'"; exit 0; }
-  if running && ip=$(tart ip "$NAME" 2>/dev/null); then echo "$NAME running at $ip"; else echo "$NAME not running"; fi ;;
+  if ! running; then echo "$NAME not running"
+  elif ip=$(vm_ip 1); then echo "$NAME running at $ip"
+  else echo "$NAME running (not answering on SSH yet)"; fi ;;
 key)
   exists || die "no VM named '$NAME' ('macvm create' first)"
   mkdir -p "$D" && chmod 700 "$D"
@@ -311,8 +330,9 @@ list|ls)
   [ -z "$made" ] || echo "Start one: macvm up <name>   Log in: macvm ssh <name>   Stop: macvm down <name>" ;;
 ssh)
   [ -n "$(cat "$D/user" 2>/dev/null)" ] || die "no account name saved for '$NAME' ('macvm create' sets it)"
+  [ -f "$KEY" ] || die "no login key for '$NAME' yet: 'macvm key $NAME' makes one"
   running || die "$NAME is not running ('macvm up $NAME')"
-  ip=$(tart ip "$NAME" --wait 120) || die "the VM has no address yet"
+  ip=$(vm_ip 24) || die "$NAME does not answer on SSH (just started? try again in a minute)"
   vm_ssh "$(cat "$D/user")@$ip" "$@" ;;
 *)
   echo "macvm: unknown command '$cmd' (macvm help explains them all)" >&2; exit 2 ;;
