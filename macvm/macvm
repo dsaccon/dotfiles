@@ -102,19 +102,29 @@ vm_ssh() {
   ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$D/known_hosts" "$@"
 }
 port_open() { nc -z -G 3 "$1" 22 2>/dev/null; }
-# Every address the Mac's DHCP server gave this VM's network card, newest first. `tart ip` alone
-# can name a stale one: installed Ubuntu identifies itself to DHCP differently from its installer.
-lease_ips() {
-  mac=$(sed -n 's/.*"macAddress" *: *"\([0-9a-fA-F:]*\)".*/\1/p' "${TART_HOME:-$HOME/.tart}/vms/$NAME/config.json" 2>/dev/null \
-    | awk -F: '{ for (i = 1; i <= NF; i++) { o = tolower($i); sub(/^0/, "", o); printf "%s%s", (i > 1 ? ":" : ""), o } }')
-  [ -n "$mac" ] || return 0
-  awk -F= -v m="1,$mac" '/ip_address=/ { ip = $2 } /hw_address=/ && $2 == m { print ip }' /var/db/dhcpd_leases 2>/dev/null
+# The VM's network card address, as the Mac writes it (no leading zeros: 0a -> a).
+vm_mac() {
+  sed -n 's/.*"macAddress" *: *"\([0-9a-fA-F:]*\)".*/\1/p' "${TART_HOME:-$HOME/.tart}/vms/$NAME/config.json" 2>/dev/null \
+    | awk -F: '{ for (i = 1; i <= NF; i++) { o = tolower($i); sub(/^0/, "", o); printf "%s%s", (i > 1 ? ":" : ""), o } }'
+}
+# Addresses for the VM's card, from the Mac's DHCP leases. Installed Ubuntu registers its lease
+# under its own ID (a DUID) rather than the card address, so this and `tart ip` can miss or go stale;
+# the ARP table always shows the card: ping every leased address, then read who answered.
+card_ips() {
+  mac=$(vm_mac); [ -n "$mac" ] || return 0
+  leases=/var/db/dhcpd_leases
+  awk -F= -v m="1,$mac" '/ip_address=/ { ip = $2 } /hw_address=/ && $2 == m { print ip }' "$leases" 2>/dev/null
+  for a in $(awk -F= '/ip_address=/ { print $2 }' "$leases" 2>/dev/null); do
+    ping -c 1 -t 1 "$a" >/dev/null 2>&1 &
+  done
+  wait
+  arp -an 2>/dev/null | awk -v m="$mac" '$4 == m { gsub(/[()]/, "", $2); print $2 }'
 }
 # The VM's address that answers on port 22; $1 tries, 5 s apart.
 vm_ip() {
   n=0
   while :; do
-    for ip in $(tart ip "$NAME" 2>/dev/null) $(lease_ips); do
+    for ip in $(tart ip "$NAME" 2>/dev/null) $(card_ips); do
       port_open "$ip" && { echo "$ip"; return 0; }
     done
     n=$((n + 1)); [ "$n" -lt "$1" ] || return 1
