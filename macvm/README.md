@@ -32,11 +32,16 @@ Remote Login** on.
 **Ubuntu Server:** `macvm create --linux` reads Ubuntu's checksum list over HTTPS, downloads the
 newest point release of the LTS's ARM64 server installer (about 3 GB, kept in
 `~/.macvm/.images`), refuses it unless its SHA-256 matches, and opens the installer in a window.
-Answer its questions (about ten minutes); the one that matters is **Install OpenSSH server**.
-After "Reboot Now", press Enter in the terminal: macvm restarts the VM without the installer.
+Answer its questions (about ten minutes); two matter: the **server's name** is the VM's name
+(`ubuntu` by default), and **Install OpenSSH server** is ticked. After "Reboot Now", press Enter
+in the terminal: macvm restarts the VM without the installer.
 
 Either way, the script then asks the account's name and its password once, to install a key
-made for that VM; after that, `macvm ssh` needs no password.
+made for that VM; after that, `macvm ssh` needs no password. For Ubuntu it asks the password a
+second time, for `sudo`, to save one network setting: installed Ubuntu identifies itself to the
+Mac's DHCP server by its own ID rather than its network card, so tart cannot name its address;
+the setting (`dhcp-identifier: mac` in `/etc/netplan/99-macvm.yaml`) makes it use the card, as
+macOS does, from its next start. Until then macvm finds the VM by its server name.
 
 Settings come from the environment and apply to `create`:
 

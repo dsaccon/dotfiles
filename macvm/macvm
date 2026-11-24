@@ -48,8 +48,9 @@ GETTING STARTED (once per VM)
                        once, so later logins need no password.
   macvm create --linux An Ubuntu Server VM named ubuntu. Downloads Ubuntu's installer (about
                        3 GB, checked against Ubuntu's published checksum) and opens it in a
-                       window. Answer its questions (about ten minutes); the one that matters:
-                       tick "Install OpenSSH server". When it says it is done, choose
+                       window. Answer its questions (about ten minutes); the ones that matter:
+                       the server's name is the VM's name (ubuntu), and tick "Install OpenSSH
+                       server". Note your password: macvm asks it at the end. When done, choose
                        "Reboot Now", then come back here and press Enter: macvm restarts the
                        VM without the installer and sets up the password-less login.
   macvm create --linux dev    The same, with your own name for the VM (here: dev).
@@ -107,24 +108,23 @@ vm_mac() {
   sed -n 's/.*"macAddress" *: *"\([0-9a-fA-F:]*\)".*/\1/p' "${TART_HOME:-$HOME/.tart}/vms/$NAME/config.json" 2>/dev/null \
     | awk -F: '{ for (i = 1; i <= NF; i++) { o = tolower($i); sub(/^0/, "", o); printf "%s%s", (i > 1 ? ":" : ""), o } }'
 }
-# Addresses for the VM's card, from the Mac's DHCP leases. Installed Ubuntu registers its lease
-# under its own ID (a DUID) rather than the card address, so this and `tart ip` can miss or go stale;
-# the ARP table always shows the card: ping every leased address, then read who answered.
-card_ips() {
-  mac=$(vm_mac); [ -n "$mac" ] || return 0
-  leases=/var/db/dhcpd_leases
-  awk -F= -v m="1,$mac" '/ip_address=/ { ip = $2 } /hw_address=/ && $2 == m { print ip }' "$leases" 2>/dev/null
-  for a in $(awk -F= '/ip_address=/ { print $2 }' "$leases" 2>/dev/null); do
-    ping -c 1 -t 1 "$a" >/dev/null 2>&1 &
-  done
-  wait
-  arp -an 2>/dev/null | awk -v m="$mac" '$4 == m { gsub(/[()]/, "", $2); print $2 }'
+# The VM's addresses from the Mac's DHCP leases (/var/db/dhcpd_leases, newest first): those
+# leased to its card address, and those leased to a machine whose hostname is the VM's name.
+# Installed Ubuntu registers under its own ID (a DUID) rather than the card address until
+# setup_key's netplan setting (dhcp-identifier: mac) takes effect at its next boot; until then
+# only the hostname finds it, which is why create asks for the VM's name as the server's name.
+lease_ips() {
+  awk -F= -v m="1,$(vm_mac)" -v h="$NAME" '
+    /^[ \t]*\{/ { n = ""; ip = "" }
+    /^[ \t]*name=/ { n = $2 }
+    /^[ \t]*ip_address=/ { ip = $2; if (n == h) print ip }
+    /^[ \t]*hw_address=/ && $2 == m { print ip }' /var/db/dhcpd_leases 2>/dev/null
 }
 # The VM's address that answers on port 22; $1 tries, 5 s apart.
 vm_ip() {
   n=0
   while :; do
-    for ip in $(tart ip "$NAME" 2>/dev/null) $(card_ips); do
+    for ip in $(tart ip "$NAME" 2>/dev/null) $(lease_ips); do
       port_open "$ip" && { echo "$ip"; return 0; }
     done
     n=$((n + 1)); [ "$n" -lt "$1" ] || return 1
@@ -159,7 +159,11 @@ setup_key() {
     read -r _
   fi
   echo "Waiting for the VM to answer on SSH (up to 5 minutes)..."
-  if [ "$(os_of)" = linux ]; then hint="was 'Install OpenSSH server' ticked?"; else hint="is Remote Login on?"; fi
+  if [ "$(os_of)" = linux ]; then
+    hint="was 'Install OpenSSH server' ticked, and the server's name '$NAME'?"
+  else
+    hint="is Remote Login on?"
+  fi
   ip=$(vm_ip 60) || die "the VM does not answer on SSH ($hint); then 'macvm key $NAME'"
   echo "Found it at $ip."
   [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C "macvm-$NAME" -f "$KEY"
@@ -167,6 +171,15 @@ setup_key() {
   vm_ssh "$user@$ip" 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < "$KEY.pub" \
     || die "could not install the key; 'macvm key $NAME' tries again"
   vm_ssh -o BatchMode=yes "$user@$ip" true || die "key login failed; 'macvm key $NAME' tries again"
+  [ "$(os_of)" = linux ] || return 0
+  # Have Ubuntu ask DHCP by its card address, as macOS does, so `tart ip` names it from its next boot.
+  dev=$(vm_ssh -o BatchMode=yes "$user@$ip" "ip -o -4 route show default | awk '{ print \$5; exit }'")
+  case $dev in
+    ''|*[!a-zA-Z0-9]*) echo "macvm: could not tell the VM's network device; skipped its network setting" >&2; return 0 ;;
+  esac
+  echo "The same password once more, for sudo: it saves a network setting so tart finds the VM."
+  vm_ssh -t "$user@$ip" "printf 'network:\n  version: 2\n  ethernets:\n    $dev:\n      dhcp4: true\n      dhcp-identifier: mac\n' | sudo tee /etc/netplan/99-macvm.yaml >/dev/null && sudo chmod 600 /etc/netplan/99-macvm.yaml" \
+    || echo "macvm: the network setting was not saved; macvm still finds the VM by its server name" >&2
 }
 # The newest point release of $UBUNTU's ARM64 server installer, checked against Ubuntu's SHA256SUMS
 # (fetched over HTTPS from the same server); kept in $ROOT/.images for the next create.
@@ -253,11 +266,12 @@ create)
     echo linux > "$D/os"
     tart set "$NAME" --cpu "$CPU" --memory "$MEMORY_MB" || die "tart set failed"
     start "--disk=$iso"
-    cat <<'STEPS'
+    cat <<STEPS
 
 The VM's window is opening with Ubuntu's installer. In it (keyboard only: arrows, Tab, Space,
 Enter), accept the defaults except:
-  1. Your name, the server's name, a username and a password: you log in as this user.
+  1. Your name, a username and a password: you log in as this user. Write the password down:
+     macvm asks for it at the end. Server's name: type $NAME (macvm finds the VM by it).
   2. Skip Ubuntu Pro.
   3. SSH: tick "Install OpenSSH server" (Space on it). Without it macvm cannot log in.
   4. Featured snaps: none needed.
